@@ -1,24 +1,17 @@
-#include <WiFiManager.h>
+#include "Arduino.h"
 #include <ESP8266WiFi.h>
-#include <ArduinoJson.h>
-#include <PubSubClient.h>
-#include <ArduinoOTA.h>
+#include <WiFiManager.h>
 #include <ESP8266mDNS.h>
-#include <SoftwareSerial.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 
-#define MQTT_CONN_RETRY_INTERVAL 60000
-
-#define DHT_ENABLED 1
-#define DHT_PIN 16
 #define DHT_POLLING_TIMEOUT 30000
+#define MQTT_POLLING_TIMEOUT 60000
 
-#define PIR_ENABLED 1
-#define PIR_PIN 4
-
-// #define SERVO_ENABLED 1
-// #define SERVO_PIN 5
-
-#define BOARD_ID "toiletgpio"
+#ifndef BOARD_ID
+#define BOARD_ID "esp8266"
+#endif
 
 char mqtt_server[64];
 char mqtt_username[64];
@@ -46,11 +39,11 @@ WiFiManagerParameter wifi_param_mqtt_server("mqtt_server", "MQTT server", mqtt_s
 WiFiManagerParameter wifi_param_mqtt_username("mqtt_user", "MQTT username", mqtt_username, sizeof(mqtt_username));
 WiFiManagerParameter wifi_param_mqtt_password("mqtt_pass", "MQTT password", mqtt_password, sizeof(mqtt_password));
 
-unsigned long lastMqttConnectionAttempt = millis();
+unsigned long mqttLastTime = millis();
 
 void sendMQTTMessage(const char *topic, const char *message, bool retained)
 {
-    Serial.printf("MQTT message - topic: <%s>, message: <%s> -> ", topic, message, retained);
+    Serial.printf("MQTT message - topic: <%s>, message: <%s> -> ", topic, message);
 
     if (mqttClient.publish(topic, message))
     {
@@ -64,8 +57,6 @@ void sendMQTTMessage(const char *topic, const char *message, bool retained)
 
 void saveConfig()
 {
-    Serial.println("Saving config...");
-
     DynamicJsonDocument json(512);
     json["mqtt_server"] = wifi_param_mqtt_server.getValue();
     json["mqtt_username"] = wifi_param_mqtt_username.getValue();
@@ -79,18 +70,14 @@ void saveConfig()
         return;
     }
 
-    Serial.printf("Saving JSON: %s", json.as<String>().c_str());
-
     serializeJson(json, configFile);
     configFile.close();
 
-    Serial.println("Config saved, please reboot");
+    Serial.printf("Saved JSON: %s", json.as<String>().c_str());
 }
 
 void loadConfig()
 {
-    Serial.println("Loading config");
-
     if (!SPIFFS.begin())
     {
         Serial.println("Failed to open SPIFFS");
@@ -136,6 +123,10 @@ void loadConfig()
 void setupGeneric()
 {
     Serial.begin(9600);
+
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+
     loadConfig();
 
     Serial.printf("Board Identifier: %s", BOARD_ID);
@@ -166,6 +157,7 @@ void setupWifi()
     {
         WiFi.mode(WIFI_STA);
         wifiManager.startWebPortal();
+        digitalWrite(LED_BUILTIN, HIGH);
     }
     else
     {
@@ -178,7 +170,7 @@ void loopWifi()
     wifiManager.process();
 }
 
-void mqttEnsureConnected()
+void mqttConnect()
 {
     if (mqttClient.connect(BOARD_ID, mqtt_username, mqtt_password, MQTT_TOPIC_AVAILABILITY, 1, true, AVAILABILITY_OFFLINE))
     {
@@ -199,15 +191,15 @@ void loopMQTT()
         return;
     }
 
-    if (currentTime - lastMqttConnectionAttempt < MQTT_CONN_RETRY_INTERVAL)
+    if (currentTime - mqttLastTime < MQTT_POLLING_TIMEOUT)
     {
         return;
     }
 
     Serial.println("Connection to MQTT lost, reconnecting...");
-    lastMqttConnectionAttempt = currentTime;
+    mqttLastTime = currentTime;
 
-    mqttEnsureConnected();
+    mqttConnect();
 }
 
 void setupOTA()
@@ -240,7 +232,7 @@ void loopMDNS()
 #include "DHTesp.h"
 
 DHTesp dht;
-unsigned long lastTimeDHTTime = 0;
+unsigned long dhtLastTime = 0;
 
 void setupDHT()
 {
@@ -249,12 +241,10 @@ void setupDHT()
 
 void loopDHT()
 {
-    if (currentTime - lastTimeDHTTime < DHT_POLLING_TIMEOUT)
+    if (currentTime - dhtLastTime < DHT_POLLING_TIMEOUT)
         return;
 
-    Serial.printf("DHT polling tick");
-
-    lastTimeDHTTime = currentTime;
+    dhtLastTime = currentTime;
 
     TempAndHumidity values = dht.getTempAndHumidity();
 
@@ -376,7 +366,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
     char payloadText[length + 1];
     snprintf(payloadText, length + 1, "%s", payload);
+
     Serial.printf("MQTT callback with topic <%s> and payload <%s>", topic, payloadText);
+    sendMQTTMessage(MQTT_TOPIC_DEBUG, payloadText, false);
 
     DynamicJsonDocument commandJson(256);
     DeserializationError err = deserializeJson(commandJson, payloadText);
@@ -384,6 +376,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     if (err)
     {
         Serial.printf("Error deserializing JSON");
+        sendMQTTMessage(MQTT_TOPIC_DEBUG, "ERR_INVALID_JSON", false);
         return;
     }
 
@@ -397,6 +390,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 #endif
 
     Serial.printf("Unknown callback command: %s", command.c_str());
+    sendMQTTMessage(MQTT_TOPIC_DEBUG, "ERR_MQTT_INVALID_COMMAND", false);
 }
 
 // -------------------
@@ -410,7 +404,7 @@ void setupMQTT()
     mqttClient.setBufferSize(2048);
     mqttClient.setCallback(mqttCallback);
 
-    mqttEnsureConnected();
+    mqttConnect();
 }
 
 void setup()
