@@ -30,6 +30,7 @@ char MQTT_TOPIC_TEMPERATURE[80];
 char MQTT_TOPIC_HUMIDITY[80];
 char MQTT_TOPIC_MOTION[80];
 char MQTT_TOPIC_SERVO[80];
+char MQTT_TOPIC_IRDA[80];
 
 WiFiManager wifiManager;
 WiFiClient wifiClient;
@@ -53,6 +54,13 @@ void sendMQTTMessage(const char *topic, const char *message, bool retained)
     {
         Serial.println("error");
     }
+}
+
+void logError(const char *msg)
+{
+    Serial.print("[ERROR] ");
+    Serial.println(msg);
+    sendMQTTMessage(MQTT_TOPIC_DEBUG, msg, false);
 }
 
 void saveConfig()
@@ -116,8 +124,6 @@ void loadConfig()
     wifi_param_mqtt_server.setValue(mqtt_server, sizeof(mqtt_server));
     wifi_param_mqtt_username.setValue(mqtt_username, sizeof(mqtt_username));
     wifi_param_mqtt_password.setValue(mqtt_password, sizeof(mqtt_password));
-
-    Serial.printf("Config JSON: %s", json.as<String>().c_str());
 }
 
 void setupGeneric()
@@ -139,6 +145,7 @@ void setupGeneric()
     snprintf(MQTT_TOPIC_HUMIDITY, 80, "%s/humidity", BOARD_ID);
     snprintf(MQTT_TOPIC_MOTION, 80, "%s/motion", BOARD_ID);
     snprintf(MQTT_TOPIC_SERVO, 80, "%s/servo", BOARD_ID);
+    snprintf(MQTT_TOPIC_IRDA, 80, "%s/irda", BOARD_ID);
 }
 
 bool portalRunning = false;
@@ -359,7 +366,49 @@ void handleServo(DynamicJsonDocument json)
 
     Serial.printf("Unknown servo method: %s", method.c_str());
 }
+#endif
 
+#define IRDA_ENABLED 1
+
+#ifdef IRDA_ENABLED
+#include <IRremote.h>
+
+void setupIRDA()
+{
+#ifdef IRDA_RECV_PIN
+    IrReceiver.begin(IRDA_RECV_PIN);
+#endif
+#ifdef IRDA_SEND_PIN
+    IrSender.begin(IRDA_SEND_PIN);
+#endif
+}
+
+void loopIRDA()
+{
+#ifdef IRDA_RECV_PIN
+    if (IrReceiver.decode())
+    {
+        IrReceiver.printIRResultShort(&Serial);
+        IrReceiver.resume();
+    }
+#endif
+}
+
+void handleIRDA(DynamicJsonDocument json)
+{
+    uint16_t address = json["address"].as<uint16_t>();
+    uint8_t code = json["code"].as<uint8_t>();
+    if (!address || !code)
+    {
+        logError("IRDA_UNDEFINED_CODE");
+        return;
+    }
+
+    Serial.printf("IRDA sending: %d %d\n", address, code);
+
+    IrSender.sendNEC(address, code, 1);
+    sendMQTTMessage(MQTT_TOPIC_IRDA, "ok", false);
+}
 #endif
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
@@ -375,8 +424,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 
     if (err)
     {
-        Serial.printf("Error deserializing JSON");
-        sendMQTTMessage(MQTT_TOPIC_DEBUG, "ERR_INVALID_JSON", false);
+        logError("INVALID_JSON");
         return;
     }
 
@@ -389,8 +437,16 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
 #endif
 
+#ifdef IRDA_ENABLED
+    if (command == "irda")
+    {
+        handleIRDA(commandJson);
+        return;
+    }
+#endif
+
     Serial.printf("Unknown callback command: %s", command.c_str());
-    sendMQTTMessage(MQTT_TOPIC_DEBUG, "ERR_MQTT_INVALID_COMMAND", false);
+    logError("MQTT_INVALID_COMMAND");
 }
 
 // -------------------
@@ -425,6 +481,9 @@ void setup()
 #ifdef SERVO_ENABLED
     setupServo();
 #endif
+#ifdef IRDA_ENABLED
+    setupIRDA();
+#endif
 }
 
 void loop()
@@ -444,5 +503,8 @@ void loop()
 #endif
 #ifdef SERVO_ENABLED
     loopServo();
+#endif
+#ifdef IRDA_ENABLED
+    loopIRDA();
 #endif
 }
