@@ -6,7 +6,6 @@
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 
-#define DHT_POLLING_TIMEOUT 30000
 #define MQTT_POLLING_TIMEOUT 60000
 
 #ifndef BOARD_ID
@@ -16,8 +15,6 @@
 char mqtt_server[64];
 char mqtt_username[64];
 char mqtt_password[64];
-
-unsigned long currentTime = millis();
 
 #define AVAILABILITY_ONLINE "online"
 #define AVAILABILITY_OFFLINE "offline"
@@ -30,7 +27,9 @@ char MQTT_TOPIC_TEMPERATURE[80];
 char MQTT_TOPIC_HUMIDITY[80];
 char MQTT_TOPIC_MOTION[80];
 char MQTT_TOPIC_SERVO[80];
+char MQTT_TOPIC_UP_DOWN[80];
 char MQTT_TOPIC_IRDA[80];
+char MQTT_TOPIC_AMBIENT_LIGHT[80];
 
 WiFiManager wifiManager;
 WiFiClient wifiClient;
@@ -135,7 +134,7 @@ void setupGeneric()
 
     loadConfig();
 
-    Serial.printf("Board Identifier: %s", BOARD_ID);
+    Serial.printf("Board Identifier: %s\n", BOARD_ID);
 
     snprintf(MQTT_TOPIC_AVAILABILITY, 80, "%s/availability", BOARD_ID);
     snprintf(MQTT_TOPIC_CALLBACK, 80, "%s/callback", BOARD_ID);
@@ -146,9 +145,9 @@ void setupGeneric()
     snprintf(MQTT_TOPIC_MOTION, 80, "%s/motion", BOARD_ID);
     snprintf(MQTT_TOPIC_SERVO, 80, "%s/servo", BOARD_ID);
     snprintf(MQTT_TOPIC_IRDA, 80, "%s/irda", BOARD_ID);
+    snprintf(MQTT_TOPIC_AMBIENT_LIGHT, 80, "%s/ambientlight", BOARD_ID);
+    snprintf(MQTT_TOPIC_UP_DOWN, 80, "%s/updown", BOARD_ID);
 }
-
-bool portalRunning = false;
 
 void setupWifi()
 {
@@ -198,13 +197,13 @@ void loopMQTT()
         return;
     }
 
-    if (currentTime - mqttLastTime < MQTT_POLLING_TIMEOUT)
+    if (millis() < mqttLastTime + MQTT_POLLING_TIMEOUT)
     {
         return;
     }
 
     Serial.println("Connection to MQTT lost, reconnecting...");
-    mqttLastTime = currentTime;
+    mqttLastTime = millis();
 
     mqttConnect();
 }
@@ -238,6 +237,10 @@ void loopMDNS()
 #ifdef DHT_ENABLED
 #include "DHTesp.h"
 
+#ifndef DHT_POLLING_TIMEOUT
+#define DHT_POLLING_TIMEOUT 60000
+#endif
+
 DHTesp dht;
 unsigned long dhtLastTime = 0;
 
@@ -248,12 +251,16 @@ void setupDHT()
 
 void loopDHT()
 {
-    if (currentTime - dhtLastTime < DHT_POLLING_TIMEOUT)
+    if (millis() < dhtLastTime + DHT_POLLING_TIMEOUT)
+    {
         return;
+    }
 
-    dhtLastTime = currentTime;
+    dhtLastTime = millis();
 
     TempAndHumidity values = dht.getTempAndHumidity();
+
+    Serial.printf("DHT: %f %f\n", values.temperature, values.humidity);
 
     if (!isnan(values.temperature))
     {
@@ -276,8 +283,71 @@ void loopDHT()
 
 #endif
 
+#ifndef UP_PIN
+#define UP_PIN 5
+#endif
+
+#ifndef DOWN_PIN
+#define DOWN_PIN 4
+#endif
+
+#ifdef UP_DOWN_ENABLED
+
+void setupUpDown()
+{
+    pinMode(UP_PIN, OUTPUT);
+    digitalWrite(UP_PIN, LOW);
+
+    pinMode(DOWN_PIN, OUTPUT);
+    digitalWrite(DOWN_PIN, LOW);
+}
+
+void loopUpDown()
+{
+}
+
+void handleUpDown(DynamicJsonDocument json)
+{
+    String direction = json["direction"].as<String>();
+    uint8_t pin = 0;
+    if (direction == "up")
+    {
+        pin = UP_PIN;
+    }
+    else if (direction == "down")
+    {
+        pin = DOWN_PIN;
+    }
+    else
+    {
+        logError("Invalid direction");
+        return;
+    }
+
+    unsigned long int timeMs = json["timeMs"].as<unsigned long int>();
+    if (!timeMs)
+    {
+        timeMs = 1000;
+    }
+
+    digitalWrite(pin, HIGH);
+    delay(timeMs);
+    digitalWrite(pin, LOW);
+    delay(200);
+
+    sendMQTTMessage(MQTT_TOPIC_UP_DOWN, "on", false);
+}
+
+#endif
+
 #ifdef PIR_ENABLED
+
+#ifndef PIR_POLLING_TIMEOUT
+#define PIR_POLLING_TIMEOUT 2000
+#endif
+
 bool pirState = false;
+unsigned long pirLastTime = 0;
 
 void setupPIR()
 {
@@ -286,7 +356,17 @@ void setupPIR()
 
 void loopPIR()
 {
-    if (digitalRead(PIR_PIN) == HIGH)
+    if (millis() < pirLastTime + PIR_POLLING_TIMEOUT)
+    {
+        return;
+    }
+
+    pirLastTime = millis();
+    int pirValue = digitalRead(PIR_PIN);
+
+    Serial.printf("PIR: %d\n", pirValue);
+
+    if (pirValue == HIGH)
     {
         if (pirState == false)
         {
@@ -302,6 +382,8 @@ void loopPIR()
             sendMQTTMessage(MQTT_TOPIC_MOTION, "0", false);
         }
     }
+
+    digitalWrite(LED_BUILTIN, !pirState);
 }
 #endif
 
@@ -360,15 +442,13 @@ void handleServo(DynamicJsonDocument json)
             }
         }
 
-        sendMQTTMessage(MQTT_TOPIC_SERVO, "1", false);
+        sendMQTTMessage(MQTT_TOPIC_SERVO, "on", false);
         return;
     }
 
     Serial.printf("Unknown servo method: %s", method.c_str());
 }
 #endif
-
-#define IRDA_ENABLED 1
 
 #ifdef IRDA_ENABLED
 #include <IRremote.h>
@@ -406,9 +486,42 @@ void handleIRDA(DynamicJsonDocument json)
 
     Serial.printf("IRDA sending: %d %d\n", address, code);
 
+    digitalWrite(LED_BUILTIN, LOW);
+
     IrSender.sendNEC(address, code, 1);
-    sendMQTTMessage(MQTT_TOPIC_IRDA, "ok", false);
+    sendMQTTMessage(MQTT_TOPIC_IRDA, "on", false);
+
+    digitalWrite(LED_BUILTIN, HIGH);
 }
+#endif
+
+#ifdef AMBIENT_LIGHT_ENABLED
+
+#ifndef AMBIENT_LIGHT_POLLING_TIMEOUT
+#define AMBIENT_LIGHT_POLLING_TIMEOUT 2000
+#endif
+
+unsigned long ambientLightLastTime = 0;
+
+void setupAmbientLight()
+{
+}
+
+void loopAmbientLight()
+{
+    if (millis() < ambientLightLastTime + AMBIENT_LIGHT_POLLING_TIMEOUT)
+    {
+        return;
+    }
+
+    ambientLightLastTime = millis();
+
+    int value = analogRead(A0);
+    Serial.printf("Ambient light: %d\n", value);
+
+    sendMQTTMessage(MQTT_TOPIC_AMBIENT_LIGHT, String(value).c_str(), false);
+}
+
 #endif
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
@@ -429,6 +542,21 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
 
     String command = commandJson["command"].as<String>();
+
+    if (command == "availability")
+    {
+        sendMQTTMessage(MQTT_TOPIC_AVAILABILITY, AVAILABILITY_ONLINE, true);
+        return;
+    }
+
+#ifdef UP_DOWN_ENABLED
+    if (command == "updown")
+    {
+        handleUpDown(commandJson);
+        return;
+    }
+#endif
+
 #ifdef SERVO_ENABLED
     if (command == "servo")
     {
@@ -484,12 +612,16 @@ void setup()
 #ifdef IRDA_ENABLED
     setupIRDA();
 #endif
+#ifdef AMBIENT_LIGHT_ENABLED
+    setupAmbientLight();
+#endif
+#ifdef UP_DOWN_ENABLED
+    setupUpDown();
+#endif
 }
 
 void loop()
 {
-    currentTime = millis();
-
     loopWifi();
     loopMDNS();
     loopOTA();
@@ -506,5 +638,11 @@ void loop()
 #endif
 #ifdef IRDA_ENABLED
     loopIRDA();
+#endif
+#ifdef AMBIENT_LIGHT_ENABLED
+    loopAmbientLight();
+#endif
+#ifdef UP_DOWN_ENABLED
+    loopUpDown();
 #endif
 }
