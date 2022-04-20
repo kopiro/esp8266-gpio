@@ -1,6 +1,6 @@
 const fs = require("fs");
 
-const TIME_MS_FROM_DOWN_TO_UP = 16500;
+const TIME_MS_FROM_DOWN_TO_UP = 15000;
 const QUEUE_NEXT_TIMEOUT = 500;
 const STATE_FILE = "/home/homebridge/home-desk.json";
 const DEFAULT_STATE = {
@@ -97,7 +97,7 @@ module.exports = {
 
     return {
       properties: {
-        getOnline: {
+        online: {
           encode(message) {
             return message;
           },

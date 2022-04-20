@@ -6,15 +6,29 @@
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 
-#define MQTT_POLLING_TIMEOUT 60000
-
 #ifndef BOARD_ID
 #define BOARD_ID "esp8266"
 #endif
 
-char mqtt_server[64];
-char mqtt_username[64];
-char mqtt_password[64];
+#ifndef MQTT_SERVER
+#define MQTT_SERVER ""
+#endif
+
+#ifndef MQTT_USERNAME
+#define MQTT_USERNAME ""
+#endif
+
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD ""
+#endif
+
+#ifndef MQTT_POLLING_TIMEOUT
+#define MQTT_POLLING_TIMEOUT 60000
+#endif
+
+char mqtt_server[64] = MQTT_SERVER;
+char mqtt_username[64] = MQTT_USERNAME;
+char mqtt_password[64] = MQTT_PASSWORD;
 
 #define AVAILABILITY_ONLINE "online"
 #define AVAILABILITY_OFFLINE "offline"
@@ -30,6 +44,7 @@ char MQTT_TOPIC_SERVO[80];
 char MQTT_TOPIC_UP_DOWN[80];
 char MQTT_TOPIC_IRDA[80];
 char MQTT_TOPIC_AMBIENT_LIGHT[80];
+char MQTT_TOPIC_SOIL_MOISTURE[80];
 
 WiFiManager wifiManager;
 WiFiClient wifiClient;
@@ -68,7 +83,6 @@ void saveConfig()
     json["mqtt_server"] = wifi_param_mqtt_server.getValue();
     json["mqtt_username"] = wifi_param_mqtt_username.getValue();
     json["mqtt_password"] = wifi_param_mqtt_password.getValue();
-    ;
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile)
@@ -93,7 +107,7 @@ void loadConfig()
 
     if (!SPIFFS.exists("/config.json"))
     {
-        Serial.println("Config file not found, please configure the ESP by connecting to its Wi-Fi hotspot");
+        Serial.println("Config file not found");
         return;
     }
 
@@ -128,6 +142,11 @@ void loadConfig()
 void setupGeneric()
 {
     Serial.begin(9600);
+    while (!Serial)
+    {
+
+        ; // wait for serial port to connect. Needed for native USB port only
+    }
 
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
@@ -147,27 +166,50 @@ void setupGeneric()
     snprintf(MQTT_TOPIC_IRDA, 80, "%s/irda", BOARD_ID);
     snprintf(MQTT_TOPIC_AMBIENT_LIGHT, 80, "%s/ambientlight", BOARD_ID);
     snprintf(MQTT_TOPIC_UP_DOWN, 80, "%s/updown", BOARD_ID);
+    snprintf(MQTT_TOPIC_SOIL_MOISTURE, 80, "%s/soilmoisture", BOARD_ID);
 }
+
+#define WIFI_MAX_TRIES 15
 
 void setupWifi()
 {
+    if (WiFi.status() == WL_NO_SHIELD)
+    {
+
+        Serial.println("WiFi shield not present");
+        return;
+    }
+
+#ifdef WIFI_SSID
+#ifdef WIFI_PASSWORD
+    Serial.printf("Connecting to WiFi (protected): %s : %s\n", WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+#else
+    Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+    WiFi.begin(WIFI_SSID);
+#endif
+
+    for (int retries = 0; retries < WIFI_MAX_TRIES && WiFi.status() != WL_CONNECTED; retries++)
+    {
+        Serial.printf("WiFi check (%d of %d)...\n", retries + 1, WIFI_MAX_TRIES);
+        delay(1000);
+    }
+
+#endif
+
     wifiManager.setConfigPortalBlocking(false);
-    wifiManager.setDebugOutput(false);
+    wifiManager.setDebugOutput(true);
     wifiManager.setSaveParamsCallback(saveConfig);
 
     wifiManager.addParameter(&wifi_param_mqtt_server);
     wifiManager.addParameter(&wifi_param_mqtt_username);
     wifiManager.addParameter(&wifi_param_mqtt_password);
 
-    if (wifiManager.autoConnect(BOARD_ID))
+    if (WiFi.status() == WL_CONNECTED || wifiManager.autoConnect(BOARD_ID))
     {
         WiFi.mode(WIFI_STA);
         wifiManager.startWebPortal();
         digitalWrite(LED_BUILTIN, HIGH);
-    }
-    else
-    {
-        Serial.println("Failed to connect to WiFi, starting AP");
     }
 }
 
@@ -178,14 +220,17 @@ void loopWifi()
 
 void mqttConnect()
 {
+    Serial.printf("Connecting to MQTT server: %s (%s : %s)... ", mqtt_server, mqtt_username, mqtt_password);
+
     if (mqttClient.connect(BOARD_ID, mqtt_username, mqtt_password, MQTT_TOPIC_AVAILABILITY, 1, true, AVAILABILITY_OFFLINE))
     {
+        Serial.println("connected");
         mqttClient.subscribe(MQTT_TOPIC_CALLBACK);
         sendMQTTMessage(MQTT_TOPIC_AVAILABILITY, AVAILABILITY_ONLINE, true);
     }
     else
     {
-        Serial.println("Unable to connect to MQTT broker");
+        Serial.println("failed");
     }
 }
 
@@ -283,6 +328,8 @@ void loopDHT()
 
 #endif
 
+#ifdef UP_DOWN_ENABLED
+
 #ifndef UP_PIN
 #define UP_PIN 5
 #endif
@@ -290,8 +337,6 @@ void loopDHT()
 #ifndef DOWN_PIN
 #define DOWN_PIN 4
 #endif
-
-#ifdef UP_DOWN_ENABLED
 
 void setupUpDown()
 {
@@ -448,6 +493,64 @@ void handleServo(DynamicJsonDocument json)
 
     Serial.printf("Unknown servo method: %s", method.c_str());
 }
+#endif
+
+#define SOIL_MOISTURE_ENABLED 1
+
+#ifdef SOIL_MOISTURE_ENABLED
+
+#ifndef SOIL_MOISTURE_POLLING_TIMEOUT
+#define SOIL_MOISTURE_POLLING_TIMEOUT 5000
+#endif
+
+#ifndef SOIL_MOISTURE_POWER_PIN
+#define SOIL_MOISTURE_POWER_PIN 5
+#endif
+
+unsigned long soilMoistureLastTime = 0;
+
+void setupSoilMoisture()
+{
+    pinMode(SOIL_MOISTURE_POWER_PIN, OUTPUT);
+    digitalWrite(SOIL_MOISTURE_POWER_PIN, LOW);
+}
+
+void loopSoilMoisture()
+{
+    if (millis() < soilMoistureLastTime + SOIL_MOISTURE_POLLING_TIMEOUT)
+    {
+        return;
+    }
+
+    Serial.println("Reading soil moisture");
+
+    soilMoistureLastTime = millis();
+
+    digitalWrite(SOIL_MOISTURE_POWER_PIN, HIGH); // Turn the sensor ON
+    delay(10);                                   // Allow power to settle
+
+    int val = analogRead(A0); // Read the analog value form sensor
+
+    digitalWrite(SOIL_MOISTURE_POWER_PIN, LOW); // Turn the sensor OFF
+
+    Serial.printf("Soil Moisture value: %d\n", val);
+
+    if (val < 500)
+    {
+        Serial.printf("Soil status: WET");
+    }
+    else if (val < 750)
+    {
+        Serial.printf("Soil status: OK");
+    }
+    else
+    {
+        Serial.printf("Soil status: DRY");
+    }
+
+    sendMQTTMessage(MQTT_TOPIC_SOIL_MOISTURE, String(val).c_str(), false);
+}
+
 #endif
 
 #ifdef IRDA_ENABLED
@@ -618,6 +721,9 @@ void setup()
 #ifdef UP_DOWN_ENABLED
     setupUpDown();
 #endif
+#ifdef SOIL_MOISTURE_ENABLED
+    setupSoilMoisture();
+#endif
 }
 
 void loop()
@@ -644,5 +750,22 @@ void loop()
 #endif
 #ifdef UP_DOWN_ENABLED
     loopUpDown();
+#endif
+#ifdef SOIL_MOISTURE_ENABLED
+    loopSoilMoisture();
+#endif
+
+#ifdef DEEP_SLEEP_SECONDS
+    Serial.printf("Going into deep sleep for %d seconds now...\n", DEEP_SLEEP_SECONDS);
+    delay(2000);
+    Serial.println("Bye!");
+    ESP.deepSleep(DEEP_SLEEP_SECONDS * 1000 * 1000);
+#endif
+
+#ifdef DEEP_SLEEP_MAX
+    Serial.printf("Going into deep sleep for max time (%d minutes) now...\n", (ESP.deepSleepMax() / (1000 * 1000 * 60)));
+    delay(2000);
+    Serial.println("Bye!");
+    ESP.deepSleep(ESP.deepSleepMax());
 #endif
 }
