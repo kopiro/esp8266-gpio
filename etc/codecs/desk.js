@@ -102,7 +102,7 @@ module.exports = {
             return message;
           },
           decode(message) {
-            return message === "online";
+            return String(message) === "online";
           },
         },
         targetPosition: {

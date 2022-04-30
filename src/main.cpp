@@ -169,6 +169,20 @@ void setupGeneric()
     snprintf(MQTT_TOPIC_SOIL_MOISTURE, 80, "%s/soilmoisture", BOARD_ID);
 }
 
+void handleDeepSleep(DynamicJsonDocument json)
+{
+    uint64_t seconds = json["seconds"].as<uint64_t>();
+    Serial.printf("Deep sleep for %lld seconds...\n", seconds);
+
+    ESP.deepSleep(seconds * 1000000);
+}
+
+void handleRestart(DynamicJsonDocument json)
+{
+    Serial.println("Restarting...");
+    ESP.restart();
+}
+
 #define WIFI_MAX_TRIES 15
 
 void setupWifi()
@@ -179,6 +193,8 @@ void setupWifi()
         Serial.println("WiFi shield not present");
         return;
     }
+
+    WiFi.hostname(BOARD_ID);
 
 #ifdef WIFI_SSID
 #ifdef WIFI_PASSWORD
@@ -495,19 +511,17 @@ void handleServo(DynamicJsonDocument json)
 }
 #endif
 
-#define SOIL_MOISTURE_ENABLED 1
-
 #ifdef SOIL_MOISTURE_ENABLED
 
 #ifndef SOIL_MOISTURE_POLLING_TIMEOUT
-#define SOIL_MOISTURE_POLLING_TIMEOUT 5000
+#define SOIL_MOISTURE_POLLING_TIMEOUT 600000
 #endif
 
 #ifndef SOIL_MOISTURE_POWER_PIN
 #define SOIL_MOISTURE_POWER_PIN 5
 #endif
 
-unsigned long soilMoistureLastTime = 0;
+unsigned long soilMoistureLastTime = -SOIL_MOISTURE_POLLING_TIMEOUT;
 
 void setupSoilMoisture()
 {
@@ -535,17 +549,11 @@ void loopSoilMoisture()
 
     Serial.printf("Soil Moisture value: %d\n", val);
 
-    if (val < 500)
+    if (val == 1024)
     {
-        Serial.printf("Soil status: WET");
-    }
-    else if (val < 750)
-    {
-        Serial.printf("Soil status: OK");
-    }
-    else
-    {
-        Serial.printf("Soil status: DRY");
+        Serial.printf("Soil Moisture sensor is disconnected");
+        logError("SOIL_MOISTURE_SENSOR_DISCONNECTED");
+        // return;
     }
 
     sendMQTTMessage(MQTT_TOPIC_SOIL_MOISTURE, String(val).c_str(), false);
@@ -632,7 +640,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     char payloadText[length + 1];
     snprintf(payloadText, length + 1, "%s", payload);
 
-    Serial.printf("MQTT callback with topic <%s> and payload <%s>", topic, payloadText);
+    Serial.printf("MQTT callback with topic <%s> and payload <%s>\n", topic, payloadText);
     sendMQTTMessage(MQTT_TOPIC_DEBUG, payloadText, false);
 
     DynamicJsonDocument commandJson(256);
@@ -649,6 +657,18 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     if (command == "availability")
     {
         sendMQTTMessage(MQTT_TOPIC_AVAILABILITY, AVAILABILITY_ONLINE, true);
+        return;
+    }
+
+    if (command == "deepsleep")
+    {
+        handleDeepSleep(commandJson);
+        return;
+    }
+
+    if (command == "restart")
+    {
+        handleRestart(commandJson);
         return;
     }
 
@@ -753,19 +773,5 @@ void loop()
 #endif
 #ifdef SOIL_MOISTURE_ENABLED
     loopSoilMoisture();
-#endif
-
-#ifdef DEEP_SLEEP_SECONDS
-    Serial.printf("Going into deep sleep for %d seconds now...\n", DEEP_SLEEP_SECONDS);
-    delay(2000);
-    Serial.println("Bye!");
-    ESP.deepSleep(DEEP_SLEEP_SECONDS * 1000 * 1000);
-#endif
-
-#ifdef DEEP_SLEEP_MAX
-    Serial.printf("Going into deep sleep for max time (%d minutes) now...\n", (ESP.deepSleepMax() / (1000 * 1000 * 60)));
-    delay(2000);
-    Serial.println("Bye!");
-    ESP.deepSleep(ESP.deepSleepMax());
 #endif
 }

@@ -2,7 +2,7 @@ module.exports = {
   init: function ({ config, log, publish }) {
     // Change config
     config.type = "custom";
-    config.minDryValue = config.minDryValue || 800;
+    config.minHumidityValue = config.minHumidityValue || 30;
     config.services = [
       {
         type: "humiditySensor",
@@ -34,15 +34,25 @@ module.exports = {
         },
         currentRelativeHumidity: {
           decode(message) {
-            console.log(`[${config.name}] Got moisture value: ${message}`);
+            log(`[${config.name}] Got moisture value: ${message}`);
+
             // Value is between 0 and 1024
             const dryValue = parseInt(message, 10);
-            if (dryValue > config.minDryValue) {
-              publish(`${config.topicPrefix}/leak`, true);
-            } else {
-              publish(`${config.topicPrefix}/leak`, false);
-            }
             const humidityValue = Math.floor(100 - (dryValue / 1024) * 100);
+
+            publish(
+              `${config.topicPrefix}/leak`,
+              humidityValue < config.minHumidityValue
+            );
+
+            // Sleep for 2h
+            setImmediate(function () {
+              publish(
+                `${config.topicPrefix}/callback`,
+                JSON.stringify({ command: "deepsleep", seconds: 60 * 60 * 2 })
+              );
+            });
+
             return humidityValue;
           },
         },
