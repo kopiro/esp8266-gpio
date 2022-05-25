@@ -50,6 +50,12 @@ module.exports = {
       const targetPosition = Number(queue.shift());
       log("Processing new targetPosition to", targetPosition);
 
+      if (targetPosition === state.currentPosition) {
+        log("Desk: Already at targetPosition", targetPosition);
+        setTimeout(processQueue, QUEUE_NEXT_TIMEOUT);
+        return;
+      }
+
       const timeMs =
         (TIME_MS_FROM_DOWN_TO_UP *
           Math.abs(targetPosition - state.currentPosition)) /
