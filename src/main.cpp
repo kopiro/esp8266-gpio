@@ -42,6 +42,7 @@ char MQTT_TOPIC_HUMIDITY[80];
 char MQTT_TOPIC_MOTION[80];
 char MQTT_TOPIC_SERVO[80];
 char MQTT_TOPIC_UP_DOWN[80];
+char MQTT_TOPIC_DESK[80];
 char MQTT_TOPIC_IRDA[80];
 char MQTT_TOPIC_AMBIENT_LIGHT[80];
 char MQTT_TOPIC_SOIL_MOISTURE[80];
@@ -167,6 +168,7 @@ void setupGeneric()
     snprintf(MQTT_TOPIC_AMBIENT_LIGHT, 80, "%s/ambientlight", BOARD_ID);
     snprintf(MQTT_TOPIC_UP_DOWN, 80, "%s/updown", BOARD_ID);
     snprintf(MQTT_TOPIC_SOIL_MOISTURE, 80, "%s/soilmoisture", BOARD_ID);
+    snprintf(MQTT_TOPIC_DESK, 80, "%s/desk", BOARD_ID);
 }
 
 void handleDeepSleep(DynamicJsonDocument json)
@@ -344,59 +346,150 @@ void loopDHT()
 
 #endif
 
-#ifdef UP_DOWN_ENABLED
+#ifdef DESK_ENABLED
 
-#ifndef UP_PIN
-#define UP_PIN 5
+#ifndef DESK_POLLING_TIMEOUT
+#define DESK_POLLING_TIMEOUT 1000
 #endif
 
-#ifndef DOWN_PIN
-#define DOWN_PIN 4
+#ifndef DESK_STUCK_MOVING_MAX
+#define DESK_STUCK_MOVING_MAX 100
 #endif
 
-void setupUpDown()
-{
-    pinMode(UP_PIN, OUTPUT);
-    digitalWrite(UP_PIN, LOW);
+#ifndef DESK_UP_PIN
+#error Please define DESK_UP_PIN
+#endif
 
-    pinMode(DOWN_PIN, OUTPUT);
-    digitalWrite(DOWN_PIN, LOW);
+#ifndef DESK_DOWN_PIN
+#error Please define DESK_DOWN_PIN
+#endif
+
+#ifndef DESK_HC_ECHO_PIN
+#error Please define DESK_HC_ECHO_PIN
+#endif
+
+#ifndef DESK_HC_TRIG_PIN
+#error Please define DESK_HC_TRIG_PIN
+#endif
+
+int currentPosition = 0;
+int targetPosition = 0;
+
+bool deskActive = false;
+
+unsigned long deskLastTime = 0;
+uint8_t minDelta = 2;
+int movingIndex = 0;
+
+void setupDesk()
+{
+    pinMode(DESK_UP_PIN, OUTPUT);
+    digitalWrite(DESK_UP_PIN, LOW);
+
+    pinMode(DESK_DOWN_PIN, OUTPUT);
+    digitalWrite(DESK_DOWN_PIN, LOW);
+
+    pinMode(DESK_HC_ECHO_PIN, INPUT);
+    pinMode(DESK_HC_TRIG_PIN, OUTPUT);
 }
 
-void loopUpDown()
+int getCurrentPosition()
 {
+    digitalWrite(DESK_HC_TRIG_PIN, LOW);
+    delayMicroseconds(2);
+
+    digitalWrite(DESK_HC_TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+
+    digitalWrite(DESK_HC_TRIG_PIN, LOW);
+
+    long duration = pulseIn(DESK_HC_ECHO_PIN, HIGH);
+    return duration * 0.034 / 2; // Speed of sound wave divided by 2 (go and back)
 }
 
-void handleUpDown(DynamicJsonDocument json)
+void handleDesk(DynamicJsonDocument json)
 {
-    String direction = json["direction"].as<String>();
-    uint8_t pin = 0;
-    if (direction == "up")
+    targetPosition = json["targetPosition"].as<int>();
+    deskActive = true;
+}
+
+DynamicJsonDocument state(512);
+
+void sendDeskStatusUpdate()
+{
+    state["currentPosition"] = currentPosition;
+    state["targetPosition"] = targetPosition;
+    state["positionState"] = deskActive ? targetPosition > currentPosition ? "INCREASING" : "DECREASING" : "STOPPED";
+
+    sendMQTTMessage(MQTT_TOPIC_DESK, state.as<String>().c_str(), false);
+}
+
+void loopDeskActive()
+{
+    currentPosition = getCurrentPosition();
+    Serial.printf("currentPosition: %d, targetPosition: %d, Difference: %d\n\n", currentPosition, targetPosition, targetPosition - currentPosition);
+
+    if (movingIndex > DESK_STUCK_MOVING_MAX)
     {
-        pin = UP_PIN;
+        Serial.printf("Desk got stuck for targetPosition = %d\n", targetPosition);
+        targetPosition = currentPosition;
+        // Set targetPosition to currentPosition so that we end the loop
     }
-    else if (direction == "down")
+
+    if (abs(targetPosition - currentPosition) < minDelta)
     {
-        pin = DOWN_PIN;
-    }
-    else
-    {
-        logError("Invalid direction");
+        Serial.println("Desk reached position");
+
+        digitalWrite(DESK_UP_PIN, LOW);
+        digitalWrite(DESK_DOWN_PIN, LOW);
+
+        deskActive = false;
+        movingIndex = 0;
+
+        sendDeskStatusUpdate();
         return;
     }
 
-    unsigned long int timeMs = json["timeMs"].as<unsigned long int>();
-    if (!timeMs)
+    int8_t pin = targetPosition > currentPosition ? DESK_UP_PIN : DESK_DOWN_PIN;
+
+    // Always make sure we set the opposite pin to LOW
+    digitalWrite(pin == DESK_UP_PIN ? DESK_DOWN_PIN : DESK_UP_PIN, LOW);
+    digitalWrite(pin, HIGH);
+
+    movingIndex++;
+
+    Serial.printf("Moving desk to %s, movingIndex = %d\n", pin == DESK_UP_PIN ? "UP" : "DOWN", movingIndex);
+    sendDeskStatusUpdate();
+}
+
+void loopDeskIdle()
+{
+    if (millis() < deskLastTime + DESK_POLLING_TIMEOUT)
     {
-        timeMs = 1000;
+        return;
     }
 
-    digitalWrite(pin, HIGH);
-    delay(timeMs);
-    digitalWrite(pin, LOW);
-    delay(200);
+    deskLastTime = millis();
 
-    sendMQTTMessage(MQTT_TOPIC_UP_DOWN, "on", false);
+    int newCurrentPosition = getCurrentPosition();
+    if (newCurrentPosition != currentPosition)
+    {
+        currentPosition = newCurrentPosition;
+        targetPosition = newCurrentPosition;
+        sendDeskStatusUpdate();
+    }
+}
+
+void loopDesk()
+{
+    if (deskActive)
+    {
+        loopDeskActive();
+    }
+    else
+    {
+        loopDeskIdle();
+    }
 }
 
 #endif
@@ -567,10 +660,10 @@ void loopSoilMoisture()
 void setupIRDA()
 {
 #ifdef IRDA_RECV_PIN
-    IrReceiver.begin(IRDA_RECV_PIN);
+    IrReceiver.begin(IRDA_RECV_PIN, false, false);
 #endif
 #ifdef IRDA_SEND_PIN
-    IrSender.begin(IRDA_SEND_PIN);
+    IrSender.begin(IRDA_SEND_PIN, false, false);
 #endif
 }
 
@@ -641,7 +734,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     snprintf(payloadText, length + 1, "%s", payload);
 
     Serial.printf("MQTT callback with topic <%s> and payload <%s>\n", topic, payloadText);
-    sendMQTTMessage(MQTT_TOPIC_DEBUG, payloadText, false);
+    // sendMQTTMessage(MQTT_TOPIC_DEBUG, payloadText, false);
 
     DynamicJsonDocument commandJson(256);
     DeserializationError err = deserializeJson(commandJson, payloadText);
@@ -696,6 +789,14 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
 #endif
 
+#ifdef DESK_ENABLED
+    if (command == "desk")
+    {
+        handleDesk(commandJson);
+        return;
+    }
+#endif
+
     Serial.printf("Unknown callback command: %s", command.c_str());
     logError("MQTT_INVALID_COMMAND");
 }
@@ -744,6 +845,9 @@ void setup()
 #ifdef SOIL_MOISTURE_ENABLED
     setupSoilMoisture();
 #endif
+#ifdef DESK_ENABLED
+    setupDesk();
+#endif
 }
 
 void loop()
@@ -773,5 +877,8 @@ void loop()
 #endif
 #ifdef SOIL_MOISTURE_ENABLED
     loopSoilMoisture();
+#endif
+#ifdef DESK_ENABLED
+    loopDesk();
 #endif
 }
