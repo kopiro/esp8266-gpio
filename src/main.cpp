@@ -199,11 +199,17 @@ void mqttConnect() {
                          MQTT_TOPIC_AVAILABILITY.c_str(), 1, true,
                          AVAILABILITY_OFFLINE)) {
     Serial.println("connected");
+
+    // Subscribe to the callback topic
+    mqttClient.subscribe(MQTT_TOPIC_CALLBACK.c_str());
+
 #ifdef HA_ENABLED
+    // Subscribe to HA restart and send the availability message
+    mqttClient.subscribe("homeassistant/status");
     sendHAAutoDiscovery();
 #endif
+
     sendMQTTMessage(MQTT_TOPIC_AVAILABILITY.c_str(), AVAILABILITY_ONLINE, true);
-    mqttClient.subscribe(MQTT_TOPIC_CALLBACK.c_str());
   } else {
     Serial.println("failed");
   }
@@ -856,61 +862,74 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
   Serial.printf("MQTT callback with topic <%s> and payload <%s>\n", topic,
                 payloadText);
 
-  DynamicJsonDocument commandJson(256);
-  DeserializationError err = deserializeJson(commandJson, payloadText);
-
-  if (err) {
-    logError("INVALID_JSON");
-    return;
-  }
-
-  String command = commandJson["command"].as<String>();
-
-  if (command == "availability") {
-    sendMQTTMessage(MQTT_TOPIC_AVAILABILITY.c_str(), AVAILABILITY_ONLINE, true);
-    return;
-  }
-
-  if (command == "deepsleep") {
-    handleDeepSleep(commandJson);
-    return;
-  }
-
-  if (command == "restart") {
-    handleRestart(commandJson);
-    return;
-  }
-
-#ifdef SERVO_ENABLED
-  if (command == "servo") {
-    handleServo(commandJson);
-    return;
+#ifdef HA_ENABLED
+  if (strcmp(topic, "homeassistant/status") == 0) {
+    if (strcmp(payloadText, "online") == 0) {
+      sendHAAutoDiscovery();
+      sendMQTTMessage(MQTT_TOPIC_AVAILABILITY.c_str(), AVAILABILITY_ONLINE, true);
+      return;
+    }
   }
 #endif
 
-#ifdef IRDA_ENABLED
-  if (command == "irda") {
-    handleIRDA(commandJson);
-    return;
-  }
-#endif
+  // Check if it's our topic
+  if (strcmp(topic, MQTT_TOPIC_CALLBACK.c_str()) == 0) {
+    DynamicJsonDocument commandJson(256);
+    DeserializationError err = deserializeJson(commandJson, payloadText);
 
-#ifdef DESK_ENABLED
-  if (command == "desk") {
-    handleDesk(commandJson);
-    return;
-  }
-#endif
+    if (err) {
+      logError("INVALID_JSON");
+      return;
+    }
 
-#ifdef LIGHT_ENABLED
-  if (command == "light") {
-    handleLight(commandJson);
-    return;
-  }
-#endif
+    String command = commandJson["command"].as<String>();
 
-  Serial.printf("Unknown callback command: %s", command.c_str());
-  logError("MQTT_INVALID_COMMAND");
+    if (command == "availability") {
+      sendMQTTMessage(MQTT_TOPIC_AVAILABILITY.c_str(), AVAILABILITY_ONLINE, true);
+      return;
+    }
+
+    if (command == "deepsleep") {
+      handleDeepSleep(commandJson);
+      return;
+    }
+
+    if (command == "restart") {
+      handleRestart(commandJson);
+      return;
+    }
+
+  #ifdef SERVO_ENABLED
+    if (command == "servo") {
+      handleServo(commandJson);
+      return;
+    }
+  #endif
+
+  #ifdef IRDA_ENABLED
+    if (command == "irda") {
+      handleIRDA(commandJson);
+      return;
+    }
+  #endif
+
+  #ifdef DESK_ENABLED
+    if (command == "desk") {
+      handleDesk(commandJson);
+      return;
+    }
+  #endif
+
+  #ifdef LIGHT_ENABLED
+    if (command == "light") {
+      handleLight(commandJson);
+      return;
+    }
+  #endif
+
+    Serial.printf("Unknown callback command: %s", command.c_str());
+    logError("MQTT_INVALID_COMMAND");
+  }
 }
 
 // -------------------
